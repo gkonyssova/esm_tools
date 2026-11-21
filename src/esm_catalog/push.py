@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import traceback as _traceback
 from pathlib import Path
-from typing import Iterable, Literal, Optional, Protocol
+from typing import Any, Iterable, Literal, Optional, Protocol
 
 from pydantic import BaseModel, Field
 from stac_geoparquet.arrow import stac_table_to_items
@@ -163,11 +163,28 @@ def count_items(path: Path) -> int:
     return 0
 
 
+def _without_nulls(value: Any) -> Any:
+    """*value* with null dict entries removed, at every level."""
+    if isinstance(value, dict):
+        return {k: _without_nulls(v) for k, v in value.items() if v is not None}
+    return value
+
+
 def shard_items_by_collection(path: Path) -> dict[CollectionId, list[StacObject]]:
-    """Read a shard and group its Items by collection id."""
+    """Read a shard and group its Items by collection id.
+
+    Drops null properties: a shard shares one schema across its rows, so
+    each row also carries the other rows' fields as nulls (``datetime``
+    stays, STAC requires it even when null).
+    """
     table = read_shard(UPath(path))
     grouped: dict[CollectionId, list[StacObject]] = {}
     for item in stac_table_to_items(table):
+        properties = item.get("properties", {})
+        item["properties"] = {
+            "datetime": properties.get("datetime"),
+            **_without_nulls(properties),
+        }
         grouped.setdefault(item["collection"], []).append(item)
     return grouped
 

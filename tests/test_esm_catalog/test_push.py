@@ -124,6 +124,23 @@ def test_shard_items_grouped_by_collection(tmp_path):
     assert pushmod.count_items(shard) == 3
 
 
+def test_shard_items_drop_other_rows_null_fields(tmp_path):
+    # A shard shares one schema, so each row also gets the other rows' keys as nulls.
+    oifs, lpj = _item("a", "c1"), _item("b", "c1")
+    oifs.properties["components"] = {"oifs": {"version": "48r1v4", "revision": "ad4"}}
+    lpj.properties["components"] = {"lpj_guess": {"version": "4.1.7", "revision": "2e9"}}
+    lpj.properties["software_note"] = "reconstructed"
+    shard = tmp_path / "s.parquet"
+    write_shard([oifs, lpj], UPath(shard))
+
+    items = {i["id"]: i["properties"] for i in pushmod.shard_items_by_collection(shard)["c1"]}
+
+    assert items["a"]["components"] == {"oifs": {"version": "48r1v4", "revision": "ad4"}}
+    assert "software_note" not in items["a"]
+    assert items["b"]["software_note"] == "reconstructed"
+    assert "datetime" in items["a"]
+
+
 # --------------------------------------------------------------------------- #
 # Classification and ordering.
 # --------------------------------------------------------------------------- #
