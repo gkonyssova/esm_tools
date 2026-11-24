@@ -1,37 +1,25 @@
-"""VCS/provenance STAC extension: which code version produced each component.
+"""Which code version produced each component, as a ``components`` table.
 
-Item-level, not Collection-level: each Item is exactly one (component,
-stream) (see item.py's module docstring), so each Item's own component has
-exactly one VCS state -- there is no need to force a per-component dict onto
-the Collection the way an earlier, now-abandoned design did (bare
-``processing:software``, keyed by component). The real ``vcs`` stac-extension
-fields (``vcs:type``/``vcs:branch``/``vcs:revision``) land directly on each
-Item's properties instead; a plain, unprefixed ``remote`` sits alongside
-them (the real extension has no remote field, and is ``additionalProperties:
-false`` -- bare ``remote`` is a deliberate, acknowledged addition, not an
-extension-schema field).
+The Collection gets one row per component and ESM-Tools; each Item gets the
+row of its own component (see :func:`component_row`). Sources, in order:
 
-Two sources per component, in priority order:
+1. ``log/<expid>_vcs_info_initial.yaml``, recorded by esm_runscripts'
+   ``add_vcs_info`` during the run ("recorded");
+2. otherwise git, run in each ``model_dir`` at scan time ("reconstructed":
+   the folder may have changed since the run).
 
-1. ``<expid>_vcs_info_initial.yaml`` under the experiment's ``log/`` dir --
-   written once by ``esm_runscripts.prepare.add_vcs_info`` from a frozen,
-   per-experiment source snapshot (see that function's docstring). This is
-   authoritative: the exact code used, whole lifetime of the experiment.
-2. If that file is missing (every run older than the snapshot fix, or a run
-   with the extension never enabled) -- read git state live from each
-   component's ``model_dir`` in the finished_config. This is the *shared*,
-   possibly-drifted central checkout, not a per-experiment snapshot, so the
-   result is always marked ``reconstructed: true``: it is a best-effort
-   after-the-fact guess at what was probably used, not a recorded fact. Both
-   sources share the same per-component dict shape (path, hash, branch_name,
-   remote, diffs, [reconstructed, note]) -- see
-   ``esm_runscripts.helpers.get_all_git_info``.
+Each component's ``build`` fingerprint (its programs and libraries in the
+latest run's ``bin`` folder) decides whether it changed between scans.
 """
 
 from __future__ import annotations
 
+import hashlib
+import posixpath
+import re
 import shlex
 import subprocess
+from datetime import date, timedelta
 from typing import Any, Optional
 
 import yaml
@@ -40,8 +28,6 @@ from upath import UPath
 
 from esm_catalog.models import ExperimentMetadata
 from esm_catalog.plugins import hookimpl
-from esm_catalog.registry import Extension
-from esm_catalog.stac_ext import apply_extension
 
 _DIFF_LINE_CAP = 500
 """Full diffs beyond this are replaced with a stat-only note -- a drifted
@@ -49,6 +35,12 @@ shared checkout can be arbitrarily dirty, and this extension must not dump an
 unbounded diff into a Collection document."""
 
 _GIT_TIMEOUT_SECONDS = 10
+
+_RECONSTRUCTED_NOTE = (
+    "Reconstructed after the fact from the shared model_dir, not a "
+    "per-experiment snapshot -- may not reflect the exact code state "
+    "actually used for this run (drift is possible)."
+)
 
 
 def _vcs_info_initial_path(exp_root: UPath, experiment_id: str) -> UPath:
@@ -107,6 +99,35 @@ def _run_git(path: str, *args: str, host: Optional[str] = None) -> Optional[str]
     return result.stdout.strip()
 
 
+def _is_git_checkout(path: str, host: Optional[str] = None) -> bool:
+    return _run_git(path, "rev-parse", "--is-inside-work-tree", host=host) == "true"
+
+
+def _esm_tools_version(path: str, host: Optional[str] = None) -> Optional[str]:
+    """ESM-Tools' version number from its code, e.g. "6.67.0" (its git tags are not release names)."""
+    source = _run_git(path, "show", "HEAD:src/esm_tools/__init__.py", host=host) or ""
+    match = re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", source, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def _reconstruct_from_model_dir(
+    component: str, model_dir: str, host: Optional[str] = None
+) -> dict[str, Any]:
+    """Like :func:`_reconstruct_component_vcs`, but also tries ``<model_dir>/<component>``."""
+    if component == "esm_tools" and _is_git_checkout(model_dir, host):
+        found = _reconstruct_component_vcs(model_dir, host=host)
+        found["software_version"] = _esm_tools_version(model_dir, host) or found["software_version"]
+        return found
+    if _is_git_checkout(model_dir, host):
+        return _reconstruct_component_vcs(model_dir, host=host)
+    subfolder = posixpath.join(model_dir, component)
+    if _is_git_checkout(subfolder, host):
+        found = _reconstruct_component_vcs(subfolder, host=host)
+        found["note"] = f"found in the {component} subfolder of model_dir"
+        return found
+    return _reconstruct_component_vcs(model_dir, host=host)
+
+
 def _reconstruct_component_vcs(path: str, host: Optional[str] = None) -> dict[str, Any]:
     """Live git state for *path*, marked as a reconstruction, never a record.
 
@@ -121,12 +142,8 @@ def _reconstruct_component_vcs(path: str, host: Optional[str] = None) -> dict[st
     passwordless ssh to that host is assumed, same as the sftp access the
     scan itself already needs to reach ``exp_root``.
     """
-    note = (
-        "Reconstructed after the fact from the shared model_dir, not a "
-        "per-experiment snapshot -- may not reflect the exact code state "
-        "actually used for this run (drift is possible)."
-    )
-    if _run_git(path, "rev-parse", "--is-inside-work-tree", host=host) != "true":
+    note = _RECONSTRUCTED_NOTE
+    if not _is_git_checkout(path, host):
         reason = "unreachable over ssh" if host else "not a git-controlled checkout"
         return {"path": path, "reconstructed": True, "note": reason}
 
@@ -139,6 +156,8 @@ def _reconstruct_component_vcs(path: str, host: Optional[str] = None) -> dict[st
         "path": path,
         "hash": _run_git(path, "rev-parse", "--short", "HEAD", host=host),
         "branch_name": _run_git(path, "rev-parse", "--abbrev-ref", "HEAD", host=host),
+        # Nearest release tag, e.g. "2.7.7" or "2.7.7-3-gcdbab44f".
+        "software_version": _run_git(path, "describe", "--tags", host=host),
         "remote": _run_git(path, "remote", "get-url", "origin", host=host),
         "diffs": diff,
         "reconstructed": True,
@@ -153,7 +172,7 @@ def vcs_by_component(exp_metadata: ExperimentMetadata) -> dict[str, dict]:
         return initial
     host = _ssh_host(exp_metadata)
     return {
-        component: _reconstruct_component_vcs(model_dir, host=host)
+        component: _reconstruct_from_model_dir(component, model_dir, host=host)
         for component, model_dir in exp_metadata.model_dirs.items()
     }
 
@@ -164,21 +183,54 @@ def vcs_by_component(exp_metadata: ExperimentMetadata) -> dict[str, dict]:
 _SOFTWARE_CACHE: dict[str, dict] = {}
 
 
+def build_fingerprint(folder: UPath) -> Optional[str]:
+    """A checksum of every file under *folder* (programs and libraries), or None if empty."""
+    if not folder.exists():
+        return None
+    files = sorted(path for path in folder.rglob("*") if path.is_file())
+    if not files:
+        return None
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(str(path.relative_to(folder)).encode())
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+    return digest.hexdigest()[:12]
+
+
+def _add_builds(exp_metadata: ExperimentMetadata, software: dict) -> None:
+    """Add each component's ``build`` fingerprint from the latest run's ``bin`` folder."""
+    root = exp_metadata.experiment_path
+    for component in exp_metadata.components:
+        candidates = [root / "bin" / component]
+        if exp_metadata.latest_run:
+            candidates.insert(0, root / exp_metadata.latest_run / "bin" / component)
+        build = next(filter(None, map(build_fingerprint, candidates)), None)
+        if build is None:
+            continue
+        entry = software.get(component)
+        if not isinstance(entry, dict):  # missing, or recorded as plain text
+            entry = software[component] = {"note": entry} if entry else {}
+        entry["build"] = build
+
+
 def _vcs_by_component_once(exp_metadata: ExperimentMetadata) -> dict[str, dict]:
     collection_id = exp_metadata.collection_id
     if collection_id in _SOFTWARE_CACHE:
         return _SOFTWARE_CACHE[collection_id]
     software = vcs_by_component(exp_metadata)
-    # vcs_item_props() silently returns {} for a component with no "hash" --
-    # every failure mode (snapshot file missing, model_dir unreachable over
-    # ssh, not a git checkout, component absent from model_dirs) collapsed
-    # into total silence, with no way to tell which one happened for a given
-    # real run (confirmed live: every production collection checked had zero
-    # vcs:revision stamping on every item, with nothing in the logs saying
-    # why). _reconstruct_component_vcs already computes a "note" explaining
-    # the reason in the reconstructed case; this is the one place that both
-    # sees it and runs only once per experiment (not once per Item).
+    _add_builds(exp_metadata, software)
+    # Say once per experiment why a version was not found, or found elsewhere.
     for component, component_vcs in software.items():
+        if isinstance(component_vcs, dict) and "subfolder" in str(component_vcs.get("note")):
+            logger.warning(
+                "vcs:* info for component {!r} in {} read from {}: its model_dir "
+                "is not a git checkout",
+                component,
+                collection_id,
+                component_vcs.get("path"),
+            )
         if isinstance(component_vcs, dict) and not component_vcs.get("hash"):
             logger.warning(
                 "No vcs:* info for component {!r} in {}: {}",
@@ -190,39 +242,31 @@ def _vcs_by_component_once(exp_metadata: ExperimentMetadata) -> dict[str, dict]:
     return software
 
 
-def vcs_item_props(component_vcs: dict) -> dict:
-    """The ``vcs:*`` (+ bare ``remote``) Item properties for one component's VCS dict.
+def _public_remote(remote: str) -> str:
+    """*remote* without any login, e.g. ``https://user:token@host/x`` -> ``https://host/x``."""
+    return re.sub(r"//[^/@]+@", "//", remote)
 
-    Parameters
-    ----------
-    component_vcs : dict
-        One component's entry from :func:`vcs_by_component` (frozen-snapshot
-        or reconstructed shape -- both share path/hash/branch_name/remote/
-        diffs/[reconstructed/note]).
 
-    Returns
-    -------
-    dict
-        The properties to set on the Item; empty if *component_vcs* has no
-        hash (nothing to report).
-    """
-    if not component_vcs.get("hash"):
-        return {}
-    props: dict[str, Any] = {
-        "vcs:type": "git",
-        "vcs:revision": component_vcs["hash"],
-    }
-    if component_vcs.get("branch_name"):
-        props["vcs:branch"] = component_vcs["branch_name"]
+def _is_reconstructed(component_vcs: Any) -> bool:
+    """Whether a version was found, by git at scan time rather than recorded."""
+    return isinstance(component_vcs, dict) and bool(
+        component_vcs.get("hash") and component_vcs.get("reconstructed")
+    )
+
+
+def component_row(component_vcs: Any) -> dict[str, Any]:
+    """One row of the ``components`` table: version, revision, branch, remote."""
+    if not isinstance(component_vcs, dict) or not component_vcs.get("hash"):
+        return {"status": "not found"}
+    row: dict[str, Any] = {}
+    if component_vcs.get("software_version"):
+        row["version"] = component_vcs["software_version"]
+    row["revision"] = component_vcs["hash"]
+    if component_vcs.get("branch_name") not in (None, "", "HEAD"):  # "HEAD": no branch
+        row["branch"] = component_vcs["branch_name"]
     if component_vcs.get("remote"):
-        # Bare, not vcs:remote: the real extension has no remote field and is
-        # additionalProperties: false.
-        props["remote"] = component_vcs["remote"]
-    if component_vcs.get("reconstructed"):
-        props["reconstructed"] = True
-        if component_vcs.get("note"):
-            props["reconstructed_note"] = component_vcs["note"]
-    return props
+        row["remote"] = _public_remote(component_vcs["remote"])
+    return row
 
 
 #: (collection_id, component) pairs already warned about by
@@ -233,10 +277,9 @@ _MISSING_COMPONENT_WARNED: set[tuple[str, str]] = set()
 
 
 def add_vcs_item_extension(item, component: str, exp_metadata: ExperimentMetadata) -> None:
-    """Set ``vcs:*`` on *item* from *component*'s VCS state, if any is known."""
-    software = _vcs_by_component_once(exp_metadata)
-    component_vcs = software.get(component)
-    if not isinstance(component_vcs, dict):
+    """Set ``components`` on *item* to its own component's row."""
+    component_vcs = _vcs_by_component_once(exp_metadata).get(component)
+    if component_vcs is None:
         key = (exp_metadata.collection_id, component)
         if key not in _MISSING_COMPONENT_WARNED:
             _MISSING_COMPONENT_WARNED.add(key)
@@ -246,12 +289,99 @@ def add_vcs_item_extension(item, component: str, exp_metadata: ExperimentMetadat
                 component,
                 exp_metadata.collection_id,
             )
-        return
-    props = vcs_item_props(component_vcs)
-    if not props:
-        return
-    item.properties.update(props)
-    apply_extension(item, Extension.vcs, validate=False)
+        component_vcs = {}
+    item.properties["components"] = {component: component_row(component_vcs)}
+    if _is_reconstructed(component_vcs):
+        item.properties["software_note"] = RECONSTRUCTED_FOOTNOTE
+
+
+RECONSTRUCTED_FOOTNOTE = (
+    "Reconstructed: read from the code folder at scan time, not recorded "
+    "during the run; may differ from the code actually used."
+)
+"""Set once per Collection or Item when a version is reconstructed."""
+
+
+def _day(when: Any) -> Optional[str]:
+    return when.date().isoformat() if when is not None else None
+
+
+def _next_day(day: Optional[str]) -> Optional[str]:
+    return (date.fromisoformat(day) + timedelta(days=1)).isoformat() if day else None
+
+
+def updated_history(exp_metadata: ExperimentMetadata) -> dict[str, list[dict[str, str]]]:
+    """Earlier scans' version history, extended by this scan.
+
+    A component changed when its ``build`` fingerprint changed, or, without one
+    (e.g. ESM-Tools), when its revision changed. Unchanged: the last entry now
+    reaches the end of the run. Changed: a new entry from the day after the last
+    one ended (dates are inclusive).
+    """
+    history = {
+        name: [dict(entry) for entry in entries]
+        for name, entries in exp_metadata.software_history.items()
+    }
+    start, end = _day(exp_metadata.run_start), _day(exp_metadata.run_end)
+    for name, component_vcs in _vcs_by_component_once(exp_metadata).items():
+        row = component_row(component_vcs)
+        build = component_vcs.get("build") if isinstance(component_vcs, dict) else None
+        if "revision" not in row and build is None:
+            continue
+        entries = history.setdefault(name, [])
+        last = entries[-1] if entries else None
+        if last is not None and _same_code(last, row.get("revision"), build):
+            last["to"] = end
+            if build:
+                last.setdefault("build", build)
+            continue
+        entry = {key: row[key] for key in ("version", "revision") if key in row}
+        if build:
+            entry["build"] = build
+        entry["from"] = _next_day(last["to"]) if last else start
+        entry["to"] = end
+        entries.append(entry)
+    return history
+
+
+def _same_code(last: dict, revision: Optional[str], build: Optional[str]) -> bool:
+    """Same program (by build), or same revision when either side has no build."""
+    if build and last.get("build"):
+        return last["build"] == build
+    return last.get("revision") == revision
+
+
+def _published_history(entries: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """*entries* without build fingerprints (kept local); a rebuild of the same revision is marked ``rebuilt``."""
+    published = []
+    for previous, entry in zip([None, *entries], entries):
+        shown: dict[str, Any] = {k: v for k, v in entry.items() if k != "build"}
+        if previous is not None and previous.get("revision") == entry.get("revision"):
+            shown["rebuilt"] = True
+        published.append(shown)
+    return published
+
+
+def add_components_table(collection, exp_metadata: ExperimentMetadata) -> None:
+    """Set ``components`` to ``{name: row}``, ESM-Tools included; changed ones get ``changed`` and ``history``."""
+    software = dict(_vcs_by_component_once(exp_metadata))
+    for component in exp_metadata.components:
+        software.setdefault(component, {})
+    history = updated_history(exp_metadata)
+    table = {}
+    for name in sorted(software):
+        table[name] = component_row(software[name])
+        if len(history.get(name, [])) > 1:
+            table[name]["changed"] = True
+            table[name]["history"] = _published_history(history[name])
+    collection.extra_fields["components"] = table
+    if any(_is_reconstructed(v) for v in software.values()):
+        collection.extra_fields["software_note"] = RECONSTRUCTED_FOOTNOTE
+
+
+@hookimpl
+def apply_to_collection(collection, exp_metadata, hints) -> None:
+    add_components_table(collection, exp_metadata)
 
 
 @hookimpl

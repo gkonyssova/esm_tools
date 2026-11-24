@@ -92,6 +92,10 @@ class ExperimentMetadata(BaseModel):
     experiment_path: UPath
     collection_stamp: Optional[str] = None
     """Random part of the Collection id, saved in the catalog folder."""
+    latest_run: Optional[str] = None
+    """The latest run's folder name, e.g. ``run_18500104-18500104``."""
+    software_history: dict[str, list[dict[str, str]]] = {}
+    """Versions seen by earlier scans (see ``vcs.updated_history``)."""
     description: Optional[str] = None
 
     @field_validator("experiment_path", mode="before")

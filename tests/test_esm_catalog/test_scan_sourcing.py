@@ -787,3 +787,36 @@ def test_existing_catalog_keeps_its_collection_id(tmp_path):
     (catalog / "collection.json").write_text(json.dumps({"id": f"{_EXPID}-c7b37639"}))
 
     assert source_experiment(exp_root).collection_id == f"{_EXPID}-c7b37639"
+
+
+def test_model_dirs_include_esm_tools_from_esm_configs_dir(tmp_path):
+    from esm_catalog.scan.sourcing import _model_dirs
+
+    docs = [{"general": {"esm_configs_dir": "/sw/esm_tools/configs/"}}]
+
+    assert _model_dirs(docs, [])["esm_tools"] == "/sw/esm_tools"
+
+
+def test_software_history_is_read_from_the_catalog_folder(tmp_path):
+    from esm_catalog.scan.workspace import WorkspaceState, save_state
+
+    exp_root = UPath(tmp_path / "run01")
+    _write_general(exp_root, {})
+    history = {"fesom": [{"revision": "abc", "from": "1850-01-01", "to": "1851-01-01"}]}
+    save_state(
+        exp_root / "catalog",
+        WorkspaceState(experiment_id=_EXPID, collection_stamp="12345678", software_history=history),
+    )
+
+    assert source_experiment(exp_root).software_history == history
+
+
+def test_latest_run_folder_comes_from_the_last_finished_config(tmp_path):
+    exp_root = UPath(tmp_path / "run01")
+    for stamp in ("18500101-18500101", "18500102-18500102"):
+        config_dir = exp_root / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with (config_dir / f"{_EXPID}_finished_config.yaml_{stamp}").open("w") as f:
+            YAML(typ="safe").dump({"general": {"expid": _EXPID}}, f)
+
+    assert source_experiment(exp_root).latest_run == "run_18500102-18500102"

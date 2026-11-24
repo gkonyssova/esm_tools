@@ -34,6 +34,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import posixpath
 import re
 import uuid
 from dataclasses import dataclass
@@ -209,6 +210,7 @@ def source_experiment(
         # rewrapping it loses the host for remote protocols (sftp://, ...).
         experiment_path=exp_root,
         collection_stamp=collection_stamp(catalog, experiment_id),
+        software_history=_software_history(catalog),
         description=_first_value(general_metadata, "Description"),
         data_license=_first_value(general_metadata, "License"),
         contacts=_file_contacts(catalog)
@@ -221,6 +223,7 @@ def source_experiment(
         components=components,
         namelists_by_component=_namelists_by_component(exp_root),
         model_dirs=_model_dirs(docs, components),
+        latest_run=_latest_run(run_cfgs),
     )
 
 
@@ -241,6 +244,12 @@ def collection_stamp(catalog: UPath, experiment_id: str) -> str:
     return stamp
 
 
+def _software_history(catalog: UPath) -> dict[str, list[dict[str, str]]]:
+    """The version history saved by earlier scans, if any."""
+    state = load_state(catalog)
+    return state.software_history if state is not None else {}
+
+
 def _existing_stamp(catalog: UPath, experiment_id: str) -> Optional[str]:
     """The stamp of the id in ``<catalog>/collection.json``, if any."""
     try:
@@ -250,6 +259,15 @@ def _existing_stamp(catalog: UPath, experiment_id: str) -> Optional[str]:
     prefix = f"{experiment_id}-"
     if isinstance(collection_id, str) and collection_id.startswith(prefix):
         return collection_id[len(prefix):] or None
+    return None
+
+
+def _latest_run(run_cfgs: list[_RunConfig]) -> Optional[str]:
+    """The latest run's folder name, from its finished_config's date suffix."""
+    for run_cfg in reversed(run_cfgs):
+        _, _, stamp = run_cfg.path.name.partition(".yaml_")
+        if stamp:
+            return f"run_{stamp}"
     return None
 
 
@@ -291,6 +309,12 @@ def _model_dirs(
             if isinstance(block, dict) and isinstance(block.get("model_dir"), str):
                 result[component] = block["model_dir"]
                 break
+    # ESM-Tools' own code folder: one level above its configs folder.
+    for doc in reversed(docs):
+        configs_dir = (doc.get("general") or {}).get("esm_configs_dir")
+        if isinstance(configs_dir, str):
+            result["esm_tools"] = posixpath.dirname(posixpath.normpath(configs_dir))
+            break
     return result
 
 

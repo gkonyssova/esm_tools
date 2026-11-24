@@ -11,7 +11,6 @@ from esm_catalog.collection import (
     make_collection,
     update_extent,
     update_variable_summary,
-    update_vcs_summary,
 )
 from esm_catalog.models import Contact
 from esm_catalog.registry import EXTENSION_URLS
@@ -47,7 +46,7 @@ def test_collection_minimal_skeleton(collection):
     assert collection.id.startswith("exp-alpha-")
     assert collection.title == "exp-alpha"
     # components come from the experiment's `components` field; none set → empty.
-    assert collection.extra_fields["components"] == []
+    assert collection.extra_fields["components"] == {}
 
 
 def test_collection_lists_all_experiment_components():
@@ -61,7 +60,7 @@ def test_collection_lists_all_experiment_components():
         },
     )
     collection = make_collection(exp_metadata)
-    assert collection.extra_fields["components"] == ["echam", "fesom"]
+    assert list(collection.extra_fields["components"]) == ["echam", "fesom"]
     params = collection.extra_fields["nml:parameters"]
     assert params["echam__namelist_echam__runctl__delta_time"] == 450
     assert params["fesom__namelist_fesom__clockinit__yearnew"] == 1850
@@ -233,48 +232,3 @@ def test_update_variable_summary_appears_in_collection_to_dict(collection):
     assert collection.to_dict()["summaries"] == {"variable": ["temp2"]}
 
 
-# --------------------------------------------------------------------------- #
-# update_vcs_summary — summaries.vcs:revision/vcs:branch, flat and deduped     #
-# across every component (NOT the abandoned per-component dict design, see    #
-# esm_catalog.vcs's module docstring)                                         #
-# --------------------------------------------------------------------------- #
-
-
-def _item_with_vcs(revision=None, branch=None):
-    properties = {}
-    if revision:
-        properties["vcs:revision"] = revision
-    if branch:
-        properties["vcs:branch"] = branch
-    return Item(
-        id="test",
-        geometry=None,
-        bbox=None,
-        datetime=datetime(2000, 1, 1, tzinfo=timezone.utc),
-        properties=properties,
-    )
-
-
-def test_update_vcs_summary_adds_revision_and_branch(collection):
-    update_vcs_summary(collection, _item_with_vcs(revision="abc123", branch="release"))
-    assert collection.summaries.lists["vcs:revision"] == ["abc123"]
-    assert collection.summaries.lists["vcs:branch"] == ["release"]
-
-
-def test_update_vcs_summary_accumulates_across_components_sorted(collection):
-    update_vcs_summary(collection, _item_with_vcs(revision="abc123"))
-    update_vcs_summary(collection, _item_with_vcs(revision="def456"))
-    update_vcs_summary(collection, _item_with_vcs(revision="abc123"))  # duplicate
-    assert collection.summaries.lists["vcs:revision"] == ["abc123", "def456"]
-
-
-def test_update_vcs_summary_noop_without_vcs_fields(collection):
-    update_vcs_summary(collection, _item_with_vcs())
-    assert "vcs:revision" not in collection.summaries.lists
-    assert "vcs:branch" not in collection.summaries.lists
-
-
-def test_update_vcs_summary_revision_without_branch(collection):
-    update_vcs_summary(collection, _item_with_vcs(revision="abc123"))
-    assert collection.summaries.lists["vcs:revision"] == ["abc123"]
-    assert "vcs:branch" not in collection.summaries.lists

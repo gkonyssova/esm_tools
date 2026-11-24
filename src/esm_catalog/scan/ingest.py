@@ -44,7 +44,6 @@ from esm_catalog.collection import (
     make_collection,
     update_extent,
     update_variable_summary,
-    update_vcs_summary,
 )
 from esm_catalog.item import FX_FREQUENCY, make_item
 from esm_catalog.models import ExperimentMetadata
@@ -71,6 +70,7 @@ from esm_catalog.scan.workspace import (
 )
 from esm_catalog.storage.geoparquet import fx_shard_name, ts_shard_name, write_shard
 from esm_catalog.types import FileMetadata
+from esm_catalog.vcs import updated_history
 
 FAILURES_FILENAME = "scan-failures.json"
 """Sidecar listing files that failed to read (path + error), for follow-up."""
@@ -738,7 +738,6 @@ def scan_experiment(
         )
         update_extent(collection, item)
         update_variable_summary(collection, item)
-        update_vcs_summary(collection, item)
         if item.properties.get("frequency") == FX_FREQUENCY:
             fx_items.append(item)
         else:
@@ -763,6 +762,7 @@ def scan_experiment(
     # first occurrence, not just within this one run.
     for key, metadata in frozen_schema.items():
         state.schema_by_stream[stream_key(*key)] = metadata
+    state.software_history = updated_history(exp_metadata)
     save_state(catalog, state)
 
     if strict and failures:

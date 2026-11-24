@@ -62,6 +62,8 @@ class WorkspaceState(BaseModel):
 
     experiment_id: ExperimentId
     collection_stamp: Optional[str] = None
+    software_history: dict[str, list[dict[str, str]]] = {}
+    """Per component, the versions seen by earlier scans and the model time each covered."""
     """Random part of the Collection id (see ``sourcing.collection_stamp``)."""
     scanned: dict[ScannedPath, Md5] = {}
     schema_by_stream: dict[StreamKey, FileMetadata] = {}
