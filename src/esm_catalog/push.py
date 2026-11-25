@@ -324,6 +324,27 @@ def _real_assets(item: StacObject) -> dict:
     return {k: v for k, v in item.get("assets", {}).items() if v is not None}
 
 
+#: Item properties that describe the latest scan; a new scan replaces them.
+_VERSION_FIELDS = ("components", "software_note")
+
+
+def _take_latest_versions(base: StacObject, incoming: list[StacObject]) -> None:
+    """Replace *base*'s version fields with the last scanned row's.
+
+    Rows without ``components`` (e.g. from ``asset rm``) leave them unchanged.
+    """
+    scanned = [row for row in incoming if "components" in row.get("properties", {})]
+    if not scanned:
+        return
+    latest = scanned[-1]["properties"]
+    properties = dict(base.get("properties") or {})
+    for field in _VERSION_FIELDS:
+        properties.pop(field, None)
+        if field in latest:
+            properties[field] = latest[field]
+    base["properties"] = properties
+
+
 def merge_item(
     existing: Optional[StacObject], incoming: list[StacObject]
 ) -> StacObject:
@@ -456,6 +477,7 @@ def merge_item(
         promoted["alternate"] = alternates
         assets[key] = promoted
 
+    _take_latest_versions(base, incoming)
     base["assets"] = assets
     if starts and ends:
         start, end = min(starts), max(ends)

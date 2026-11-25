@@ -277,7 +277,7 @@ _MISSING_COMPONENT_WARNED: set[tuple[str, str]] = set()
 
 
 def add_vcs_item_extension(item, component: str, exp_metadata: ExperimentMetadata) -> None:
-    """Set ``components`` on *item* to its own component's row."""
+    """Set ``components`` on *item* to its own component's row, with history if it changed."""
     component_vcs = _vcs_by_component_once(exp_metadata).get(component)
     if component_vcs is None:
         key = (exp_metadata.collection_id, component)
@@ -290,7 +290,10 @@ def add_vcs_item_extension(item, component: str, exp_metadata: ExperimentMetadat
                 exp_metadata.collection_id,
             )
         component_vcs = {}
-    item.properties["components"] = {component: component_row(component_vcs)}
+    history = updated_history(exp_metadata)
+    item.properties["components"] = {
+        component: _row_with_history(component_vcs, history.get(component, []))
+    }
     if _is_reconstructed(component_vcs):
         item.properties["software_note"] = RECONSTRUCTED_FOOTNOTE
 
@@ -362,18 +365,25 @@ def _published_history(entries: list[dict[str, str]]) -> list[dict[str, Any]]:
     return published
 
 
+def _row_with_history(component_vcs: Any, entries: list[dict[str, str]]) -> dict[str, Any]:
+    """:func:`component_row`, plus ``changed`` and ``history`` when the code changed during the experiment."""
+    row = component_row(component_vcs)
+    if len(entries) > 1:
+        row["changed"] = True
+        row["history"] = _published_history(entries)
+    return row
+
+
 def add_components_table(collection, exp_metadata: ExperimentMetadata) -> None:
     """Set ``components`` to ``{name: row}``, ESM-Tools included; changed ones get ``changed`` and ``history``."""
     software = dict(_vcs_by_component_once(exp_metadata))
     for component in exp_metadata.components:
         software.setdefault(component, {})
     history = updated_history(exp_metadata)
-    table = {}
-    for name in sorted(software):
-        table[name] = component_row(software[name])
-        if len(history.get(name, [])) > 1:
-            table[name]["changed"] = True
-            table[name]["history"] = _published_history(history[name])
+    table = {
+        name: _row_with_history(software[name], history.get(name, []))
+        for name in sorted(software)
+    }
     collection.extra_fields["components"] = table
     if any(_is_reconstructed(v) for v in software.values()):
         collection.extra_fields["software_note"] = RECONSTRUCTED_FOOTNOTE

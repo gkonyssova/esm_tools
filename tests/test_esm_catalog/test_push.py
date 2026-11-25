@@ -547,6 +547,35 @@ def test_merge_item_preserves_existing_geometry_on_a_tombstone_only_push():
     assert merged["assets"] == {}
 
 
+def test_merge_item_takes_versions_from_the_latest_scan():
+    existing = _asset_item("fesom-mon", "c", "185001")
+    existing["properties"]["frequency"] = "mon"
+    existing["properties"]["components"] = {"fesom": {"revision": "old"}}
+    existing["properties"]["software_note"] = "Reconstructed: ..."
+    earlier = _asset_item("fesom-mon", "c", "185002")
+    earlier["properties"]["components"] = {"fesom": {"revision": "old"}}
+    latest = _asset_item("fesom-mon", "c", "185003")
+    latest["properties"]["components"] = {"fesom": {"revision": "new", "changed": True}}
+
+    merged = pushmod.merge_item(existing, [earlier, latest])
+
+    assert merged["properties"]["components"] == {
+        "fesom": {"revision": "new", "changed": True}
+    }
+    assert "software_note" not in merged["properties"]  # latest scan has none
+    assert merged["properties"]["frequency"] == "mon"  # other fields kept
+
+
+def test_merge_item_keeps_versions_on_a_push_without_them():
+    existing = _asset_item("fesom-mon", "c", "185001")
+    existing["properties"]["components"] = {"fesom": {"revision": "old"}}
+    tombstone = {**_asset_item("fesom-mon", "c", "x"), "removed_assets": ["185001"]}
+
+    merged = pushmod.merge_item(existing, [tombstone])
+
+    assert merged["properties"]["components"] == {"fesom": {"revision": "old"}}
+
+
 def test_merge_item_added_alternates_merges_without_touching_other_fields():
     existing = _asset_item("echam-ts", "c", "200001")
     row = _asset_item("echam-ts", "c", "200001")

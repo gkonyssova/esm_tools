@@ -434,6 +434,23 @@ def test_changed_revision_adds_an_entry_and_shows_in_the_table(tmp_path):
     assert row["history"] == second["fesom"]
 
 
+def test_changed_component_shows_its_history_on_the_item(tmp_path, item):
+    from datetime import datetime
+
+    model_dir = tmp_path / "models" / "fesom"
+    _git_repo(model_dir)
+    _, first = _scan(tmp_path, model_dir, {}, datetime(1851, 1, 1))
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "fix"], cwd=model_dir, check=True)
+    em, second = _scan(tmp_path, model_dir, first, datetime(1852, 1, 1))
+
+    add_vcs_item_extension(item, "fesom", em)
+
+    row = item.properties["components"]["fesom"]
+    assert row["revision"] == second["fesom"][-1]["revision"]
+    assert row["changed"] is True
+    assert row["history"] == second["fesom"]
+
+
 def test_unchanged_component_has_no_history_in_the_table(tmp_path):
     from datetime import datetime
 
